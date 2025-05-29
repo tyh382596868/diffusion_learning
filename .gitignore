@@ -1,0 +1,15 @@
+weight/*.pth
+
+# 深度学习模型权重
+*.pth
+*.pt
+*.ckpt
+
+# 数据集
+data/
+
+# 日志
+logs/
+
+# 缓存
+.cache/

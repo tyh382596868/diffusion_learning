@@ -58,6 +58,9 @@ def get_dataset(name):
 
         return dataset
 
+    elif name=='minist':
+        pass
+
 if __name__=="__main__":
     device = 'cuda'
 
