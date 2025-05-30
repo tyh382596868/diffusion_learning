@@ -4,12 +4,16 @@ import torch
 from diffusers import DDPMPipeline
 from tqdm import tqdm
 
+from torchvision import datasets, transforms
+from torch.utils.data import DataLoader
+import pdb
+
 def get_dataset(name):
 
     if name=='smithsonian_butterflies_subset':
         dataset = load_dataset("huggan/smithsonian_butterflies_subset", split="train")
         print(dataset)
-        from torchvision import transforms
+        # from torchvision import transforms
         image_size = 64
         # Define transformations
         preprocess = transforms.Compose(
@@ -34,7 +38,7 @@ def get_dataset(name):
         dataset = load_dataset('huggan/pokemon',split='train')
 
         # trasnform the dataset
-        from torchvision import transforms
+        # from torchvision import transforms
 
         # We keep this higher than in the book in this part for visualization
         image_size = 64
@@ -58,35 +62,61 @@ def get_dataset(name):
 
         return dataset
 
-    elif name=='minist':
-        pass
+    elif name=='mnist':
+        image_size = 64
+
+
+        # 定义数据预处理
+        transform = transforms.Compose([
+            transforms.Resize((image_size, image_size)),  # 添加调整大小操作
+            transforms.ToTensor(),  # 转换为Tensor
+            transforms.Normalize((0.5,), (0.5,))  # 归一化到[-1, 1]范围
+        ])
+
+        # 加载MNIST训练集
+        dataset = datasets.MNIST(
+            root='/data/tyh/ws/diffusion_from_scrach/data',          # 数据存储路径
+            train=True,             # 使用训练集
+            download=True,          # 自动下载
+            transform=transform     # 应用预处理
+        )
+
+        return dataset
 
 if __name__=="__main__":
     device = 'cuda'
 
-    name = 'pokemon'
+    name = 'mnist'
     dataset = get_dataset(name)
 
+    # 根据不同的数据集设定模型参数
+    if name == 'pokemon' or name == 'smithsonian_butterflies_subset':
+        in_channels=3
+        out_channels=3
+    elif name == 'mnist':
+        in_channels=1
+        out_channels=1
 
-    batch_size = 6
+    batch_size = 16
     train_dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     # 对用于训练的数据可视化
-    batch = next(iter(train_dataloader))
-    rows,cols = 2,4
-    fig,axes = plt.subplots(rows,cols)
-    axes = axes.flatten()
+    if name == 'pokemon' or name == 'smithsonian_butterflies_subset':
+        batch = next(iter(train_dataloader))
+        rows,cols = 2,4
+        fig,axes = plt.subplots(rows,cols)
+        axes = axes.flatten()
 
-    for i, axis in enumerate(axes):
-        if i < len(batch["images"]):  # 确保不超过batch大小
-            # 将(C, H, W)转置为(H, W, C)
-            img = batch["images"][i].permute(1, 2, 0) * 0.5 + 0.5
-            # 确保像素值在[0,1]范围内（处理浮点数图像）
-            img = torch.clamp(img, 0, 1).cpu().numpy()
-            axis.imshow(img)
-            axis.axis("off")
+        for i, axis in enumerate(axes):
+            if i < len(batch["images"]):  # 确保不超过batch大小
+                # 将(C, H, W)转置为(H, W, C)
+                img = batch["images"][i].permute(1, 2, 0) * 0.5 + 0.5
+                # 确保像素值在[0,1]范围内（处理浮点数图像）
+                img = torch.clamp(img, 0, 1).cpu().numpy()
+                axis.imshow(img)
+                axis.axis("off")
 
-    plt.savefig(f'/data/tyh/ws/diffusion_from_diffusers/img/02_0_{name}_datasetViz.png')
+        plt.savefig(f'/data/tyh/ws/diffusion_from_diffusers/img/02_0_{name}_datasetViz.png')
 
     from diffusers import DDPMScheduler# We'll learn about beta_start and beta_end in the next sections
     scheduler = DDPMScheduler(num_train_timesteps=1000, beta_start=0.001, beta_end=0.02)
@@ -94,7 +124,8 @@ if __name__=="__main__":
 
     from diffusers import UNet2DModel
     model = UNet2DModel(
-        in_channels=3,  # 3 channels for RGB images
+        in_channels=in_channels,  # 3 channels for RGB images
+        out_channels=out_channels,
         sample_size=64,  # Specify our input size
         # The number of channels per block affects the model size
         block_out_channels=(64, 128, 256, 512),
@@ -113,10 +144,16 @@ if __name__=="__main__":
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     losses = []  # Somewhere to store the loss values for later plotting
     # Train the model (this takes a while)
+
     for epoch in tqdm(range(num_epochs)):
         for batch in tqdm(train_dataloader):
-            # Load the input images
-            clean_images = batch["images"].to(device)
+            if name == 'pokemon' or name == 'smithsonian_butterflies_subset':
+                # Load the input images
+                clean_images = batch["images"].to(device)
+            else:
+
+                clean_images = batch[0].to(device) #batch是list，索引0是图像，1是标签
+            # pdb.set_trace()
             # Sample noise to add to the images
             noise = torch.randn(clean_images.shape).to(device)
             # Sample a random timestep for each image
@@ -148,7 +185,7 @@ if __name__=="__main__":
 
             # sample 
             pipeline = DDPMPipeline(unet=model, scheduler=scheduler)
-            ims = pipeline(batch_size=4).images
+            ims = pipeline(batch_size=4, output_type="pt").images
 
             rows,cols = 1,4
             fig,axes = plt.subplots(rows,cols)
