@@ -4,6 +4,7 @@ weight/*.pth
 *.pth
 *.pt
 *.ckpt
+*.png
 
 # 数据集
 data/

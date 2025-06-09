@@ -3,18 +3,18 @@ import matplotlib.pyplot as plt
 import torch
 from diffusers import DDPMPipeline
 from tqdm import tqdm
-
+from torch.cuda.amp import autocast, GradScaler
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 import pdb
 
-def get_dataset(name):
+def get_dataset(name,image_size=64):
 
     if name=='smithsonian_butterflies_subset':
         dataset = load_dataset("huggan/smithsonian_butterflies_subset", split="train")
         print(dataset)
         # from torchvision import transforms
-        image_size = 64
+        image_size = image_size
         # Define transformations
         preprocess = transforms.Compose(
             [
@@ -41,7 +41,7 @@ def get_dataset(name):
         # from torchvision import transforms
 
         # We keep this higher than in the book in this part for visualization
-        image_size = 64
+        image_size = image_size
 
         # Define transformations
         preprocess = transforms.Compose(
@@ -63,7 +63,7 @@ def get_dataset(name):
         return dataset
 
     elif name=='mnist':
-        image_size = 64
+        image_size = image_size
 
 
         # 定义数据预处理
@@ -85,9 +85,12 @@ def get_dataset(name):
 
 if __name__=="__main__":
     device = 'cuda'
+    Multi_gpu = True
+    amp = True
 
-    name = 'mnist'
-    dataset = get_dataset(name)
+    name = 'pokemon'
+    image_size = 64
+    dataset = get_dataset(name,image_size=image_size)
 
     # 根据不同的数据集设定模型参数
     if name == 'pokemon' or name == 'smithsonian_butterflies_subset':
@@ -97,8 +100,8 @@ if __name__=="__main__":
         in_channels=1
         out_channels=1
 
-    batch_size = 16
-    train_dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    batch_size = 32*4
+    train_dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True,num_workers=4)
 
     # 对用于训练的数据可视化
     if name == 'pokemon' or name == 'smithsonian_butterflies_subset':
@@ -116,7 +119,7 @@ if __name__=="__main__":
                 axis.imshow(img)
                 axis.axis("off")
 
-        plt.savefig(f'/data/tyh/ws/diffusion_from_diffusers/img/02_0_{name}_datasetViz.png')
+        plt.savefig(f'/data/tyh/ws/diffusion_from_diffusers/img/02_0_{name}_{image_size}_datasetViz.png')
 
     from diffusers import DDPMScheduler# We'll learn about beta_start and beta_end in the next sections
     scheduler = DDPMScheduler(num_train_timesteps=1000, beta_start=0.001, beta_end=0.02)
@@ -138,13 +141,20 @@ if __name__=="__main__":
         up_block_types=("AttnUpBlock2D", "AttnUpBlock2D", "UpBlock2D", "UpBlock2D"),
     ).to(device)
 
+    if Multi_gpu:
+        # 多GPU训练支持
+        if torch.cuda.device_count() > 1:
+            print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
+            model = torch.nn.DataParallel(model)
+
     from torch.nn import functional as F
     num_epochs = 50  # How many runs through the data should we do?
     lr = 1e-4  # What learning rate should we use
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     losses = []  # Somewhere to store the loss values for later plotting
     # Train the model (this takes a while)
-
+    if amp:
+        scaler = GradScaler()
     for epoch in tqdm(range(num_epochs)):
         for batch in tqdm(train_dataloader):
             if name == 'pokemon' or name == 'smithsonian_butterflies_subset':
@@ -170,21 +180,37 @@ if __name__=="__main__":
             # Get the model prediction for the noise
             # The model also uses the timestep as an input
             # for additional conditioning
-            noise_pred = model(noisy_images, timesteps, return_dict=False)[0]
-            # Compare the prediction with the actual noise
-            loss = F.mse_loss(noise_pred, noise)
-            # Store the loss for later plotting
-            losses.append(loss.item())
-            # Update the model parameters with the optimizer based on this loss
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
+            if amp:
+                with autocast():
+                    # Forward pass through the model
+                    noise_pred = model(sample=noisy_images, timestep=timesteps, return_dict=False)[0]
+                    # Compare the prediction with the actual noise
+                    loss = F.mse_loss(noise_pred, noise)
+            else:
+                noise_pred = model(sample=noisy_images, timestep=timesteps, return_dict=False)[0]
+                # Compare the prediction with the actual noise
+                loss = F.mse_loss(noise_pred, noise)
 
+            if amp:
+                losses.append(loss.item())
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()      
 
+            else:          
+                # Store the loss for later plotting
+                losses.append(loss.item())
+                # Update the model parameters with the optimizer based on this loss
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
+
+            # break
         if epoch % 5==0:
 
             # sample 
-            pipeline = DDPMPipeline(unet=model, scheduler=scheduler)
+            pipeline = DDPMPipeline(unet=model.module if isinstance(model, torch.nn.DataParallel) else model, scheduler=scheduler)
             ims = pipeline(batch_size=4, output_type="pt").images
 
             rows,cols = 1,4
@@ -195,10 +221,10 @@ if __name__=="__main__":
                 axes[i].imshow(img)
                 axes[i].axis('off')
 
-            plt.savefig(f'/data/tyh/trash/02_0_{name}_{epoch}_sampleViz.png')  
+            plt.savefig(f'/data/tyh/trash/02_0_{name}_{image_size}_{epoch}_sampleViz.png')  
 
     # 保存模型
-    torch.save(model, f'/data/tyh/ws/diffusion_from_diffusers/weight/02_0_{name}_model_{epoch}.pth')
+    torch.save(model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict(), f'/data/tyh/ws/diffusion_from_diffusers/weight/02_0_{name}_{image_size}_model_{epoch}.pth')
 
     # 保存训练损失
     plt.subplots(1, 2, figsize=(12, 4))
@@ -210,10 +236,10 @@ if __name__=="__main__":
     plt.plot(range(400, len(losses)), losses[400:])
     plt.title("Training loss from step 400")
     plt.xlabel("Training step")
-    plt.savefig(f'/data/tyh/ws/diffusion_from_diffusers/img/02_0_{name}_trainingLoss.png')
+    plt.savefig(f'/data/tyh/ws/diffusion_from_diffusers/img/02_0_{name}_{image_size}_trainingLoss.png')
 
     # sample 
-    pipeline = DDPMPipeline(unet=model, scheduler=scheduler)
+    pipeline = DDPMPipeline(unet=model.module if isinstance(model, torch.nn.DataParallel) else model, scheduler=scheduler)
     ims = pipeline(batch_size=4).images
 
     rows,cols = 1,4
@@ -224,4 +250,4 @@ if __name__=="__main__":
         axes[i].imshow(img)
         axes[i].axis('off')
 
-    plt.savefig(f'/data/tyh/ws/diffusion_from_diffusers/img/02_0_{name}_sampleViz.png')
+    plt.savefig(f'/data/tyh/ws/diffusion_from_diffusers/img/02_0_{name}_{image_size}_sampleViz.png')
